@@ -52,10 +52,32 @@ class ReusedHandle {
 // socket to a new request. Call it here, at the equivalent moment for a
 // pooled `pg` connection, so the socket forgets the previous operation's
 // context instead of carrying it forward indefinitely.
+//
+// `asyncReset` alone is not quite enough on every Node version still in
+// support, though: on Node <24, `AsyncLocalStorage` additionally stamps a
+// resource with an internal `kResourceStore` symbol at creation time (used
+// to drive `executionAsyncResource()`-style APIs), and `asyncReset` does
+// not itself refresh that symbol -- confirmed via heap snapshot, even
+// though it does correctly fix which context *later events* dispatch into.
+// The stale value just sits there, unrelated to dispatch, reachable for as
+// long as the socket exists. Node 24+'s newer context-tracking does not
+// have this property at all. There is no public API for clearing it, so
+// this reaches for the symbol directly -- undesirable in general, but the
+// only way to avoid this version-dependent retention until Node exposes
+// one.
 function resetClientAsyncContext(client) {
   const handle = client && client.connection && client.connection.stream && client.connection.stream._handle
-  if (handle && typeof handle.asyncReset === 'function') {
-    handle.asyncReset(new ReusedHandle(handle.getProviderType(), handle))
+  if (!handle || typeof handle.asyncReset !== 'function') {
+    return
+  }
+
+  handle.asyncReset(new ReusedHandle(handle.getProviderType(), handle))
+
+  const resourceStoreSymbol = Object.getOwnPropertySymbols(handle).find((symbol) =>
+    symbol.toString().includes('kResourceStore')
+  )
+  if (resourceStoreSymbol) {
+    handle[resourceStoreSymbol] = undefined
   }
 }
 

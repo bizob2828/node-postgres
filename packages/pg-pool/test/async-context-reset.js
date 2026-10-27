@@ -35,6 +35,44 @@ describe('async context on client reuse', () => {
     }
   })
 
+  it('clears the legacy kResourceStore context when handing out a reused client', async () => {
+    // On Node <24, AsyncLocalStorage stamps a resource with an internal
+    // kResourceStore symbol at creation time; this only happens while an
+    // ALS context is actually active, so one has to be running here for
+    // the symbol to exist at all.
+    const als = new AsyncLocalStorage()
+    const pool = new Pool({ max: 1 })
+
+    try {
+      const first = await als.run('first-connect', () => pool.connect())
+      const handle = first.connection.stream._handle
+      const resourceStoreSymbol = Object.getOwnPropertySymbols(handle).find((symbol) =>
+        symbol.toString().includes('kResourceStore')
+      )
+
+      if (!resourceStoreSymbol) {
+        // Node 24+ tracks async context differently and never stamps this
+        // symbol in the first place, so there's nothing to clear.
+        first.release()
+        return
+      }
+
+      expect(handle[resourceStoreSymbol]).to.equal('first-connect')
+
+      first.release()
+
+      const second = await pool.connect()
+      try {
+        expect(second).to.equal(first)
+        expect(handle[resourceStoreSymbol]).to.equal(undefined)
+      } finally {
+        second.release()
+      }
+    } finally {
+      await pool.end()
+    }
+  })
+
   it('does not leak the connecting context into a later query on a reused client', (done) => {
     const als = new AsyncLocalStorage()
     const pool = new Pool({ max: 1 })
